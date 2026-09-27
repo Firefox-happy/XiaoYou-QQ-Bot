@@ -1,0 +1,17 @@
+# 小柚 · QQ 猫娘机器人 —— Python 依赖
+#
+# 安装：pip install -r requirements.txt
+#
+# 只有 4 个包，都是有必要的：
+#   requests        调用大模型 API、读网页
+#   websocket-client 连 NapCat 的 OneBot WebSocket（收消息）
+#   edge-tts        让机器人能开口说话（免 Key，微软的公开接口）
+#   imageio-ffmpeg  自带 ffmpeg 二进制，语音格式转换用
+#
+# 想用「本机语音克隆」（GPT-SoVITS）的话，那套是独立环境，
+# 不装在这里，见 README「可选：让她用自己的声音说话」。
+
+requests>=2.31
+websocket-client>=1.7
+edge-tts>=6.1
+imageio-ffmpeg>=0.4.9

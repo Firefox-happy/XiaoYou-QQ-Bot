@@ -1,0 +1,137 @@
+{
+  "napcat": {
+    "ws_url": "ws://127.0.0.1:3001",
+    "http_url": "http://127.0.0.1:3000",
+    "access_token": ""
+  },
+  "llm": {
+    "provider": "openai",
+    "ollama_url": "http://127.0.0.1:11434",
+    "model": "qwen2.5:7b-instruct",
+    "temperature": 0.85,
+    "max_tokens": 220,
+    "timeout": 120,
+    "api_key": "",
+    "api_base": "https://api.deepseek.com/v1"
+  },
+  "persona_file": "persona.md",
+  "memes_file": "memes.md",
+  "trigger": {
+    "group_at": true,
+    "group_keywords": [
+      "小柚"
+    ],
+    "private": true,
+    "ignore_self": true
+  },
+  "reply": {
+    "at_sender_in_group": true,
+    "typing_delay": [
+      0.8,
+      2.2
+    ],
+    "max_chars": 180,
+    "split_threshold": 120,
+    "on_error": "（小柚的脑袋卡住了…主人稍等一下喵）"
+  },
+  "memory": {
+    "max_turns": 12,
+    "enabled": true
+  },
+  "tools": {
+    "enabled": true,
+    "max_rounds": 3,
+    "max_tokens": 700,
+    "timeout": 12,
+    "search_provider": "bing",
+    "bocha_key": "",
+    "max_facts_per_user": 30
+  },
+  "voice": {
+    "enabled": true,
+    "speak_probability": 0.15,
+    "speak_on": [
+      "晚安",
+      "喵呜~",
+      "喜欢你",
+      "想你",
+      "抱抱"
+    ],
+    "max_chars": 55,
+    "rate": 1,
+    "group_enabled": false,
+    "tts_provider": "auto",
+    "edge_voice": "zh-CN-XiaoyiNeural",
+    "edge_rate": 8,
+    "edge_pitch": 10,
+    "edge_volume": 0,
+    "gptsovits_url": "http://127.0.0.1:9880",
+    "gptsovits_ref_audio": "",
+    "gptsovits_ref_text": "",
+    "gptsovits_ref_lang": "zh",
+    "gptsovits_speed": 1.0,
+    "gptsovits_temperature": 1.0,
+    "gptsovits_split": "cut0",
+    "gptsovits_loudness": -16.0
+  },
+  "vision": {
+    "enabled": true,
+    "model": "deepseek-chat",
+    "max_images": 3
+  },
+  "proactive": {
+    "enabled": true,
+    "owner_qq": "",
+    "greeting_time": "08:30",
+    "city": "",
+    "nudge": {
+      "enabled": true,
+      "silence_min": 45,
+      "silence_max": 240,
+      "cooldown": 40,
+      "private_max_per_day": 3,
+      "group_enabled": true,
+      "group_silence_min": 60,
+      "group_max_per_day": 1,
+      "quiet_hours": [
+        "23:30",
+        "09:00"
+      ],
+      "after_greet_grace": 3600
+    }
+  },
+  "rate_limit": {
+    "per_session_cooldown": 3,
+    "global_per_minute": 20,
+    "max_concurrent": 2
+  },
+  "watch": {
+    "enabled": true,
+    "interval_sec": 2,
+    "settle_sec": 3,
+    "cooldown_sec": 20
+  },
+  "health": {
+    "enabled": true,
+    "interval_sec": 20,
+    "hb_stale_sec": 90,
+    "busy_sec": 600,
+    "ws_down_sec": 300,
+    "grace_sec": 120,
+    "max_per_hour": 6
+  },
+  "notify": {
+    "enabled": true,
+    "popup": true,
+    "sound": true,
+    "min_interval_min": 30,
+    "quiet_hours": [
+      "23:30",
+      "09:00"
+    ]
+  },
+  "whitelist": {
+    "groups": [],
+    "users": []
+  }
+}

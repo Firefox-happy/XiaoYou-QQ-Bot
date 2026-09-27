@@ -1,0 +1,70 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.python-version
+
+# ===== 你的真实配置（含密钥，绝对不要提交）=====
+config.json
+!config.example.json
+.env
+catbot/napcat/**/config/.env
+
+# ===== 运行期产物 =====
+logs/
+catbot/logs/
+catbot/run/
+catbot/tmp/
+*.log
+catbot/napcat_account.txt
+
+# ===== 启动脚本（由 catbot/_make_bats.py 在你本机生成，含本机 Python 路径）=====
+# 别人克隆后跑一次 `python catbot/_make_bats.py` 就会重新生成，别提交。
+*.bat
+!catbot/_test/*.bat
+
+# ===== 个人数据 =====
+# 记忆库：留着会有你和机器人的聊天记录
+catbot/memory/
+# 梗库自动更新区会随机器改动；persona.md / memes.md 本身要提交
+catbot/_test/_out/
+catbot/_test/settings_out.txt
+
+# 测试脚本跑出来的结果文件（人工看的，别提交）
+catbot/_test/*_out.txt
+catbot/_test/_memes_result.txt
+设置页-预览.html
+
+# ===== NapCat 运行时（二进制，请自行下载，见 README）=====
+catbot/napcat/node.exe
+catbot/napcat/*.dll
+catbot/napcat/wrapper.node
+catbot/napcat/napcat/
+catbot/napcat/node_modules/
+catbot/napcat/win64/
+catbot/napcat/*.exe
+
+# ===== 大文件 / 个人数据目录 =====
+参考资料/
+参考音色/
+语音情绪样带/
+换嗓试听/
+_archive/
+catbot/_archive/
+catbot/napcat/napcat/config/_bak_*/
+
+# ===== 模型权重（自己下，别进仓库）=====
+*.pth
+*.ckpt
+*.safetensors
+
+# ===== 编辑器 / 系统 =====
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+~$*
