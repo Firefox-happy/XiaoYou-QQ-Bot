@@ -57,7 +57,11 @@ def main():
 
     # 示例文件默认走"云端"这条更容易上手的路（不用先装 Ollama）：
     # provider=openai + 本地 ollama_url 留着，用户两种都能切。
+    # ⚠️ provider / model / api_base 是**一套**的：只把 provider 改成 openai、
+    #    却留着出厂默认的 model=qwen2.5:7b-instruct（那是本地模型名），
+    #    用户照抄后就会拿本地模型名去请求云端接口，必然报 model 不存在。
     _set(cfg, "llm.provider", "openai")
+    _set(cfg, "llm.model", "deepseek-flash")
 
     OUT.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n",
                    encoding="utf-8")

@@ -53,6 +53,59 @@ def check_python():
     hr()
 
 
+# ---------- 2. 用户配置 ----------
+def check_user_config():
+    """检查 catbot/config.json 在不在、填没填。
+
+    这是新用户最容易漏的一步（README「安装」第 4 步）：没复制 config.json
+    就启动，大脑会因为读不到配置而退出，但表面上看就是"机器人没反应"，
+    很难联想到是配置文件的问题。
+    """
+    print("[2] 用户配置")
+    cfg_path = os.path.join(HERE, "config.json")
+    if not os.path.exists(cfg_path):
+        bad("还没创建 config.json")
+        if os.path.exists(os.path.join(HERE, "config.example.json")):
+            print("        修复：在本目录执行  copy config.example.json config.json")
+        else:
+            print("        修复：拿一份 config.example.json 复制成 config.json")
+        print("        然后用记事本打开，至少填 llm.api_key 和 proactive.owner_qq")
+        hr()
+        return
+
+    try:
+        import json
+        with open(cfg_path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        bad("config.json 解析失败：%s" % e)
+        print("        多半是少了/多了逗号，或用了中文引号。")
+        print("        拿不准就重新用一份 config.example.json 覆盖重填。")
+        hr()
+        return
+
+    llm = data.get("llm") if isinstance(data.get("llm"), dict) else {}
+    provider = str(llm.get("provider") or "").strip().lower()
+    api_key = str(llm.get("api_key") or "").strip()
+    model = str(llm.get("model") or "?").strip()
+
+    if provider == "ollama":
+        ok("配置就绪（本地模型 ollama · %s，不需要 API Key）" % model)
+    elif not api_key:
+        bad("llm.api_key 还没填 —— 用云端模型必须先填，"
+            "否则她收得到消息但永远不回")
+        print("        去 https://platform.deepseek.com 注册拿一个 Key，填进 config.json")
+    else:
+        ok("配置就绪（云端模型 · %s）" % model)
+
+    pro = data.get("proactive") if isinstance(data.get("proactive"), dict) else {}
+    if str(pro.get("owner_qq") or "").strip():
+        ok("已设置主人 QQ（定时早安会发给他）")
+    else:
+        warn("proactive.owner_qq 没填 —— 定时早安不知道发给谁，会跳过")
+    hr()
+
+
 # ---------- 2. Ollama ----------
 def port_alive(host, port, timeout=1.5):
     try:
@@ -63,7 +116,7 @@ def port_alive(host, port, timeout=1.5):
 
 
 def check_ollama():
-    print("[2] 猫娘大脑（本地模型）")
+    print("[3] 猫娘大脑（本地模型）")
     if not port_alive("127.0.0.1", 11434):
         warn("Ollama 服务未运行（启动器会自动拉起它）")
         hr()
@@ -87,7 +140,7 @@ def check_ollama():
 
 # ---------- 3. NapCat 文件 ----------
 def check_napcat_files():
-    print("[3] NapCat 协议层文件")
+    print("[4] NapCat 协议层文件")
     inner = os.path.join(HERE, "napcat", "napcat")
     need = [
         "launcher-user.bat",
@@ -172,7 +225,7 @@ def find_qq():
 
 
 def check_qq():
-    print("[4] NapCat 独立模式依赖")
+    print("[5] NapCat 独立模式依赖")
     # 独立模式不需要 QQ 客户端在运行，但 wrapper.node 依赖 BoringSSL 两个 dll
     nap = os.path.join(HERE, "napcat")
     missing = [n for n in ("ssl.dll", "crypto.dll")
@@ -196,7 +249,7 @@ def check_qq():
 
 # ---------- 5. 配置 ----------
 def check_config():
-    print("[5] NapCat 网络配置")
+    print("[6] NapCat 网络配置")
     import json
 
     found = glob.glob(os.path.join(HERE, "napcat", "napcat", "config", "onebot11*.json"))
@@ -253,7 +306,7 @@ def check_config():
 
 # ---------- 6. 运行状态 ----------
 def check_running():
-    print("[6] 运行状态（启动完成后看这里）")
+    print("[7] 运行状态（启动完成后看这里）")
     http_up = port_alive("127.0.0.1", 3000)
     ws_up = port_alive("127.0.0.1", 3001)
     if http_up and ws_up:
@@ -272,6 +325,7 @@ def main():
     print("=" * 60)
     hr()
     check_python()
+    check_user_config()
     check_ollama()
     check_napcat_files()
     check_qq()
