@@ -111,14 +111,18 @@ def main() -> int:
     wav = OUT_DIR / "小柚_默认参考.wav"
     txt = OUT_DIR / "小柚_默认参考.txt"
 
-    if not synth_mp3(mp3):
-        return 1
-    if not to_wav(mp3, wav):
-        return 1
     try:
+        if not synth_mp3(mp3):
+            print("        这一步要联网调 Edge 语音服务。连不上就检查代理/防火墙，")
+            print("        或者先跳过：语音引擎保持默认的 edge 也能正常说话。")
+            return 1
+        if not to_wav(mp3, wav):
+            print("        ffmpeg 由 imageio-ffmpeg 自带，确认依赖装全了：")
+            print("        pip install -r requirements.txt")
+            return 1
+    finally:
+        # 不管成没成，别把中间产物留在 参考音色/ 里
         mp3.unlink(missing_ok=True)
-    except Exception:
-        pass
 
     txt.write_text(REF_TEXT, encoding="utf-8")
     dur = wav_seconds(wav)

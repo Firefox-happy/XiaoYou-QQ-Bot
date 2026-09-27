@@ -78,7 +78,7 @@
 ### 1. 下载本项目
 
 ```bash
-git clone https://github.com/<你的用户名>/XiaoYou-QQ-Bot.git
+git clone https://github.com/Firefox-happy/XiaoYou-QQ-Bot.git
 cd XiaoYou-QQ-Bot
 ```
 
@@ -367,11 +367,20 @@ copy config.example.json config.json
 
 ## 可选：让她用自己的声音说话
 
-默认用微软 Edge 的「晓伊」音色（免费、免 Key）。想换成**你自己的声音**：
+默认用微软 Edge 的「晓伊」音色（免费、免 Key）。想让她用 GPT-SoVITS 说话：
 
 1. 按 [GPT-SoVITS 官方文档](https://github.com/RVC-Boss/GPT-SoVITS) 装好，
    建好 `venv`
-2. 准备一段 5~10 秒的清晰人声（参考音色），放进 `参考音色/`
+2. 先自动生成一份**默认参考音色**（拿晓伊的嗓子当底样，10 秒不到）：
+
+   ```bash
+   .venv\Scripts\python catbot\_make_ref_audio.py
+   ```
+
+   它会在项目根建出 `参考音色\小柚_默认参考.wav` 和同名 `.txt`。
+   > 想换成**你自己的声音**：录一段 5~10 秒的清晰人声（无背景音、
+   > 情绪单一、别分段插静音），覆盖那个 `.wav`，再把同名 `.txt`
+   > 改成**逐字对应**的文本。文本和音频对不上，念出来会跑调。
 3. 双击 `语音服务-启动.bat`（脚本会自动找 GPT-SoVITS 目录；
    找不到就设环境变量 `XIAOYOU_GSV` 指向它）
 4. 在设置页把 `voice.tts_provider` 改成 `gptsovits`
