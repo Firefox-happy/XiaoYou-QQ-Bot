@@ -313,7 +313,7 @@ SCHEMA = [
     F("proactive.enabled", "开启主动消息", "总开关：管早安，也管下面的冷场暖场。关掉她就只被动回话。",
       "bool", True, "proactive"),
     F("proactive.owner_qq", "主人 QQ 号", "早安发给他。留空就从记忆里推断（可能推断错）。",
-      "text", "", "proactive", hint="如 2641515305"),
+      "text", "", "proactive", hint="如 10001"),
     F("proactive.greeting_time", "早安时间", "每天几点说早安。她说完就去忙别的了。",
       "time", "08:30", "proactive"),
     F("proactive.city", "所在城市", "填了早安才会顺带报天气；不填只能报时间。",
