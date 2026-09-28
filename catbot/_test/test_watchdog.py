@@ -530,6 +530,14 @@ def _mon8(name, val):
     _s8.setdefault(name, getattr(sc, name))
     setattr(sc, name, val)
 
+# ⚠️ 把 RUN_DIR 指向临时目录：remember_napcat_pid() 里除了 write_napcat_pids()
+# 还有一句直接写 (RUN_DIR / "napcat.pid")。只打桩 write_napcat_pids 挡不住它，
+# 会把测试用的假 pid 333 写进**真实** run/napcat.pid —— 已经踩过一次
+# （连带起了个 pid 333 的幽灵，查了半天）。所以从根上隔离整个 RUN_DIR。
+_s8_rundir = Path(tempfile.mkdtemp(prefix="xy_wd8_"))
+_mon8("RUN_DIR", _s8_rundir)
+_mon8("NAPCAT_PIDS_FILE", _s8_rundir / "napcat_pids.json")
+
 _mon8("read_pid", lambda name: 111 if name == "napcat" else 0)
 _mon8("pid_alive", lambda pid: pid in (111, 222))
 _mon8("proc_name", lambda pid: "node.exe")
@@ -577,6 +585,7 @@ ck("新拉起的 pid 追加进清单、旧的活着的保留、死的丢掉",
 
 for _k, _v in _s8.items():
     setattr(sc, _k, _v)
+shutil.rmtree(_s8_rundir, ignore_errors=True)
 
 
 print("\n=== 8b. 协议层启动冷却（别连着作废验证会话）===")
