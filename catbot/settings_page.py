@@ -277,7 +277,7 @@ SCHEMA = [
     F("proactive.enabled", "开启主动消息", "总开关：管早安，也管下面的冷场暖场。关掉她就只被动回话。",
       "bool", True, "proactive"),
     F("proactive.owner_qq", "主人 QQ 号", "早安发给他。留空就从记忆里推断（可能推断错）。",
-      "text", "", "proactive", hint="如 10001"),
+      "text", "", "proactive", hint="如 2641515305"),
     F("proactive.greeting_time", "早安时间", "每天几点说早安。她说完就去忙别的了。",
       "time", "08:30", "proactive"),
     F("proactive.city", "所在城市", "填了早安才会顺带报天气；不填只能报时间。",
@@ -704,7 +704,7 @@ def build_status() -> dict:
     if sc.protocol_up():
         add("napcat", "协议层", "ok", "端口正常", "HTTP 3000 / WS 3001 都在监听。")
     else:
-        npid = sc.read_pid("napcat")
+        npid = sc.napcat_pid()
         issue = sc._napcat_login_issue()
         qr = sc._qr_age()
         kind = issue[0] if issue else ""
@@ -712,11 +712,11 @@ def build_status() -> dict:
             add("napcat", "协议层", "bad", "被风控拦截",
                 "服务器原话：%s\n\n解法：手机上用最新版手机QQ登录这个号，按提示做完安全验证。\n"
                 "风控没解除前，扫码和快速登录都会被拒 —— 先别扫了。" % issue[1])
-        elif sc.pid_alive(npid) and qr is not None and qr < 240:
+        elif sc.napcat_alive() and qr is not None and qr < 240:
             add("napcat", "协议层", "warn", "需要扫码",
                 "QQ 登录态过期了，要人工扫一次。\n双击根目录的「扫码登录.bat」。\n"
                 "备用入口：%s" % sc._webui_url())
-        elif sc.pid_alive(npid):
+        elif sc.napcat_alive():
             add("napcat", "协议层", "warn", "正在登录", "进程在（pid %d）但端口没起。" % npid)
         else:
             add("napcat", "协议层", "off", "没在跑", "点「重启」会把它一起拉起来。")

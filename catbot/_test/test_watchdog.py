@@ -518,6 +518,157 @@ daemon._handed_over = False
 for _k, _v in _s3.items():
     setattr(daemon, _k, _v)
 
+print("\n=== 8. 协议层判活：认清单，不认单一 pid ===")
+# 背景（2026-09-28 实测的代价）：独立模式下 NapCat 是「主进程 + Fork Worker」
+# 两个 node，而 pid 文件只能记一个、写入还是无条件覆盖。只要 pid 文件被替死鬼
+# 顶掉，守护进程就会判定「协议层不在」→ 再拉一个 → **上一个验证链接当场作废**。
+# 用户看到的现象是「二维码怎么又过期了」。
+import service_ctl as sc
+
+_s8 = {}
+def _mon8(name, val):
+    _s8.setdefault(name, getattr(sc, name))
+    setattr(sc, name, val)
+
+_mon8("read_pid", lambda name: 111 if name == "napcat" else 0)
+_mon8("pid_alive", lambda pid: pid in (111, 222))
+_mon8("proc_name", lambda pid: "node.exe")
+_mon8("read_napcat_pids", lambda: [111, 222])
+ck("清单里两个都活 → 协议层活着", sc.napcat_alive(), True)
+ck("napcat_pid() 给出活着的那个", sc.napcat_pid(), 111)
+
+_mon8("read_napcat_pids", lambda: [111, 222])
+_mon8("pid_alive", lambda pid: pid == 222)      # pid 文件那个(111)死了
+ck("pid 文件那个死了、但清单里另一个还活 → 仍算活着（旧版会误判成死）",
+   sc.napcat_alive(), True)
+
+_mon8("read_napcat_pids", lambda: [111, 222])
+_mon8("pid_alive", lambda pid: False)
+ck("清单里全部死了 → 协议层不在", sc.napcat_alive(), False)
+
+_mon8("read_napcat_pids", lambda: [111])
+_mon8("pid_alive", lambda pid: True)
+_mon8("proc_name", lambda pid: "notepad.exe")   # pid 被系统回收给了别人
+ck("pid 被回收给非 node 进程 → 不算我们的（防止误杀别人的程序）",
+   sc.napcat_alive(), False)
+
+_mon8("read_napcat_pids", lambda: [111])
+_mon8("proc_name", lambda pid: "")
+_mon8("pid_alive", lambda pid: True)
+ck("拿不到映像名时宁可认它活着（保守，免得平白重启）", sc.napcat_alive(), True)
+
+# 死 pid 会被顺手清掉
+_written = []
+_mon8("read_napcat_pids", lambda: [111, 222])
+_mon8("pid_alive", lambda pid: pid == 222)
+_mon8("write_napcat_pids", lambda pids: _written.append(list(pids)))
+sc.napcat_alive()
+ck("判活时顺手把死 pid 从清单里清掉", _written[-1] if _written else None, [222])
+
+# remember：不能覆盖，要追加且丢掉死掉的
+_written.clear()
+_mon8("read_pid", lambda name: 111 if name == "napcat" else 0)
+_mon8("read_napcat_pids", lambda: [111, 222])
+_mon8("pid_alive", lambda pid: pid == 222)
+_mon8("proc_name", lambda pid: "node.exe")
+sc.remember_napcat_pid(333)
+ck("新拉起的 pid 追加进清单、旧的活着的保留、死的丢掉",
+   _written[-1] if _written else None, [222, 333])
+
+for _k, _v in _s8.items():
+    setattr(sc, _k, _v)
+
+
+print("\n=== 8b. 协议层启动冷却（别连着作废验证会话）===")
+_s8b = {}
+def _mon8b(name, val):
+    _s8b.setdefault(name, getattr(daemon, name))
+    setattr(daemon, name, val)
+
+_mon8b("NAPCAT_NODE", Path(os.path.abspath(__file__)))       # 假装文件都在
+_mon8b("NAP_DIR", Path(os.path.abspath(__file__)).parent)
+_mon8b("NAPCAT_ENTRY", os.path.abspath(__file__))
+_mon8b("ensure_boringssl", lambda: True)
+_mon8b("read_account", lambda: "1234567890")
+_mon8b("write_pid", lambda name, pid: None)
+_mon8b("remember_napcat_pid", lambda pid: None)
+_mon8b("LOG_DIR", TMP)
+
+class _FakeProc:
+    pid = 4242
+
+started = []
+def _fake_popen(*a, **k):
+    started.append(a)
+    return _FakeProc()
+
+_real_popen = daemon.subprocess.Popen
+daemon.subprocess.Popen = _fake_popen
+
+daemon._napcat_last_start = 0.0
+ck("首次拉起成功", daemon.start_protocol(), True)
+ck("冷却期内再拉 → 拒绝（这是防「二维码又过期」的关键闸门）",
+   daemon.start_protocol(), False)
+ck("确实只真正拉起了一次", len(started), 1)
+ck("force=True 能跳过冷却（给用户主动重启用）",
+   daemon.start_protocol(force=True), True)
+ck("force 那次也拉起来了", len(started), 2)
+
+daemon._napcat_last_start = daemon._napcat_last_start - daemon.NAPCAT_START_COOLDOWN - 1
+ck("过了冷却期就可以再拉", daemon.start_protocol(), True)
+
+print("\n=== 8c. 卡在短信验证时自动降级成扫码 ===")
+# 实测依据（2026-09-28）：带 -q 快速登录 → 票据失效 → 密码回退 → QQ 要验证码
+# → 卡住且**不再生成二维码**，必须开 WebUI 等短信填码；
+# 不带 -q 则直接出二维码，手机扫一下就行 —— 后者人做得快得多。
+_qr_flag = TMP / "force_qr_login"
+_mon8b("FORCE_QR_FLAG", _qr_flag)
+_s8b["__QRFLAG__"] = True
+
+_qr_flag.unlink(missing_ok=True)
+ck("默认（无 flag）→ 走快速登录", daemon._use_quick_login(), True)
+ck("force_qr=True → 一定走扫码", daemon._use_quick_login(force_qr=True), False)
+ck("force_qr=False → 一定走快速登录", daemon._use_quick_login(force_qr=False), True)
+
+daemon.mark_need_qr()
+ck("立了 flag 之后 → 改走扫码", daemon._use_quick_login(), False)
+ck("flag 文件确实写出来了", _qr_flag.exists(), True)
+
+# 过期的 flag 要自动失效，别永久退化
+old = time.time() - daemon.QR_FLAG_TTL - 10
+os.utime(_qr_flag, (old, old))
+ck("flag 过期（6 小时后）→ 自动回到快速登录", daemon._use_quick_login(), True)
+
+daemon.mark_need_qr()
+daemon.clear_need_qr()
+ck("登录成功清 flag → 回到快速登录", daemon._use_quick_login(), True)
+ck("flag 文件已被删掉", _qr_flag.exists(), False)
+
+# _maybe_switch_to_qr 只在「确实是验证码卡住」时才动手
+_s8b["_sc_orig"] = daemon._sc
+_fake_sc = type("FakeSC", (), {})()
+_fake_sc._napcat_login_issue = lambda max_age_hours=1.0: ("captcha", "要验证码", 0.1)
+daemon._sc = lambda: _fake_sc
+daemon.clear_need_qr()
+ck("卡在验证码 → 自动切扫码", daemon._maybe_switch_to_qr(), True)
+ct = daemon._use_quick_login()
+ck("切完之后确实不用 -q 了", ct, False)
+
+daemon.clear_need_qr()
+_fake_sc._napcat_login_issue = lambda max_age_hours=1.0: ("scanned", "扫了没放行", 0.1)
+ck("只是等扫码/被拒 → 不乱切（走扫码本来就没用）",
+   daemon._maybe_switch_to_qr(), False)
+
+_fake_sc._napcat_login_issue = lambda max_age_hours=1.0: None
+ck("没有登录问题 → 不动", daemon._maybe_switch_to_qr(), False)
+daemon.clear_need_qr()
+
+daemon.subprocess.Popen = _real_popen
+_s8b.pop("__QRFLAG__", None)
+for _k, _v in _s8b.items():
+    setattr(daemon, _k, _v)
+daemon._napcat_last_start = 0.0
+
 shutil.rmtree(TMP, ignore_errors=True)
 
 print("\n%s" % ("=" * 50))

@@ -110,30 +110,8 @@ def find_ollama() -> Path | None:
             return cand
     return None
 
-# bot.py 的运行环境解释器（带 requests / websocket-client）。
-#
-# 不用硬编码路径 —— 那样别人克隆下来必然跑不起来。探测顺序：
-#   ① 项目自己的 .venv / venv（推荐，见 README「安装」一节）
-#   ② 当前解释器旁边同名的 pythonw.exe
-#   ③ 环境变量 XIAOYOU_PYTHON（给虚拟环境放在别处的人用）
-# 都找不到时会在启动自检里报出来，而不是静默用一个错的解释器。
-def _find_venv_pythonw() -> Path | None:
-    if os.environ.get("XIAOYOU_PYTHON"):
-        p = Path(os.environ["XIAOYOU_PYTHON"])
-        if p.exists():
-            return p
-    # 两个位置都找：catbot/.venv（代码同目录）和 项目根/.venv（更常规的放法）
-    for root in (BASE_DIR, BASE_DIR.parent):
-        for name in (".venv", "venv", "env"):
-            for rel in (Path("Scripts") / "pythonw.exe", Path("bin") / "pythonw"):
-                cand = root / name / rel
-                if cand.exists():
-                    return cand
-    side = Path(sys.executable).with_name("pythonw.exe")
-    return side if side.exists() else None
-
-
-VENV_PYTHONW = _find_venv_pythonw()
+# bot.py 的 requests / websocket-client 装在 catbot 这个 venv 里，必须用它
+VENV_PYTHONW = Path(r"C:\Users\26415\.workbuddy\binaries\python\envs\catbot\Scripts\pythonw.exe")
 
 HEARTBEAT = RUN_DIR / "daemon.heartbeat"
 POLL_SECONDS = 45          # 稳态巡检间隔：链路稳了就不用频繁打扰
@@ -187,8 +165,8 @@ if not _NO_FILE_LOG:
 
 
 def pythonw() -> Path:
-    """优先项目 venv 的解释器，否则退回当前解释器旁边的 pythonw。"""
-    if VENV_PYTHONW is not None and VENV_PYTHONW.exists():
+    """优先 catbot venv 的解释器，否则退回当前解释器旁边的 pythonw。"""
+    if VENV_PYTHONW.exists():
         return VENV_PYTHONW
     cand = Path(sys.executable).with_name("pythonw.exe")
     return cand if cand.exists() else Path(sys.executable)
@@ -792,6 +770,32 @@ def write_pid(name: str, pid: int) -> None:
         log.warning("写 pid 文件失败: %s", name)
 
 
+# 协议层判活 —— **单一真源在 service_ctl.py**（`napcat_alive()` 等）。
+# 这里只做薄委托，绝不另写一份：这个项目已经栽过太多次「同一条判断写两处、
+# 改了一处忘了另一处」的跟头（见 SKILL.md 铁律 7）。
+def _sc():
+    import service_ctl
+    return service_ctl
+
+
+def napcat_alive() -> bool:
+    """协议层进程还活着吗（认全部已知 pid，不是只认 pid 文件那一个）。"""
+    try:
+        return _sc().napcat_alive()
+    except Exception:
+        log.exception("协议层判活失败，退回只认 pid 文件")
+        return pid_alive(read_pid("napcat"))
+
+
+def remember_napcat_pid(pid: int) -> None:
+    """把新拉起的 NapCat pid 记进清单（不覆盖已有，见 service_ctl 里的说明）。"""
+    try:
+        _sc().remember_napcat_pid(pid)
+    except Exception:
+        log.exception("记录 NapCat pid 失败")
+        write_pid("napcat", pid)
+
+
 def port_open(port: int, host: str = "127.0.0.1", timeout: float = 1.0) -> bool:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -848,8 +852,110 @@ def ensure_boringssl() -> bool:
 # 启动动作
 # --------------------------------------------------------------------------
 
-def start_protocol() -> bool:
-    """独立模式启动 NapCat：完全不碰 QQ 客户端。"""
+# 协议层启动冷却：两次拉起之间至少隔这么久。
+#
+# 为什么必须有（2026-09-28 实测的代价）：
+#   `start_protocol()` 原先**没有任何节流**，只要判活认为"进程不在"就拉。
+#   而一旦判活出错（旧版只看 pid 文件那一个 pid，很容易被替死鬼顶掉），
+#   就会一轮接一轮地拉 —— 实测 15:32/15:33/15:34 三分钟内拉了三次。
+#
+#   **每多拉一次 = WebUI 多一个登录会话 = 上一个验证链接/二维码当场作废。**
+#   用户那边看到的就是「二维码怎么又过期了」「怎么点都点不上」。
+#   冷却期的作用是：就算判活偶尔抽风，也不会连着作废用户手上的验证会话。
+NAPCAT_START_COOLDOWN = 120.0
+_napcat_last_start = 0.0
+
+
+# --------------------------------------------------------------------------
+# 启动方式：带 `-q`（快速登录）还是不带（二维码）
+# --------------------------------------------------------------------------
+# 实测（2026-09-28）两条路的结果**完全不同**：
+#
+#   带 `-q <账号>`：快速登录 → 票据失效 → 密码回退 → **QQ 要短信验证码**
+#                  → 卡在「等你完成验证」，二维码也不再生成。
+#                  要救它必须：开 WebUI 登录页 → 触发短信 → 等短信 → 填码。
+#
+#   不带 `-q`     ：NapCat 直接进入**二维码登录**，手机扫一下就完事。
+#                  而且它每 ~2 分钟自己刷新，扫到成功为止。
+#
+# 结论：**二维码这条路人做得更快**（扫一下 vs 开网页+等短信+填码），
+# 所以在「上一轮已经卡在验证」时，应该主动降级成扫码，而不是一遍遍
+# 重试那条注定要人肉验证的密码路。
+#
+# 注意：这里**不改**「配了免扫码密码」这件事本身 —— 它仍然是票据失效后
+# 唯一的自动恢复路径。只是当它已经证明走不通（要验证码）时，别再死磕。
+FORCE_QR_FLAG = RUN_DIR / "force_qr_login"
+QR_FLAG_TTL = 6 * 3600.0        # 6 小时后自动忘记，回到默认的快速登录
+
+
+def _use_quick_login(force_qr: bool | None = None) -> bool:
+    """该不该带 `-q` 启动。纯函数（除了读那个小 flag 文件）。
+
+    force_qr=True  → 一定不带 -q（走扫码）
+    force_qr=None  → 看 flag 文件还在不在（在就扫码，过期/不存在就快速登录）
+    """
+    if force_qr is not None:
+        return not force_qr
+    try:
+        age = time.time() - FORCE_QR_FLAG.stat().st_mtime
+    except OSError:
+        return True                    # 没 flag → 照常快速登录
+    return age > QR_FLAG_TTL          # flag 太老 → 当它不存在
+
+
+def mark_need_qr() -> None:
+    """记下「快登这条路走不通了，下次改扫码」。"""
+    try:
+        FORCE_QR_FLAG.write_text(str(time.time()), encoding="ascii")
+        log.warning("已切换为「扫码登录」模式 —— 下次启动协议层不再带 -q，"
+                    "会直接出二维码（扫码比等短信验证码快得多）。"
+                    "6 小时后自动恢复尝试快速登录。")
+    except Exception:
+        log.exception("写扫码 flag 失败")
+
+
+def clear_need_qr() -> None:
+    """登录成功了 —— 把 flag 清掉，下次回到正常的快速登录。"""
+    try:
+        if FORCE_QR_FLAG.exists():
+            FORCE_QR_FLAG.unlink()
+            log.info("登录已恢复，清除「扫码登录」标记")
+    except Exception:
+        pass
+
+
+def _maybe_switch_to_qr() -> bool:
+    """卡住的原因若是「等短信验证」，就立起 flag 让下次走扫码。
+
+    只在**确实是验证码卡住**时才切换，别的情况（比如单纯等扫码、被风控）
+    不该乱动 —— 那些走扫码本来就没用。
+    """
+    try:
+        sc = _sc()
+        issue = sc._napcat_login_issue(max_age_hours=1.0)
+    except Exception:
+        return False
+    if not issue or issue[0] != "captcha":
+        return False
+    if not _use_quick_login():          # 已经是扫码模式了，不用再切
+        return False
+    mark_need_qr()
+    return True
+
+
+def start_protocol(force: bool = False, force_qr: bool | None = None) -> bool:
+    """独立模式启动 NapCat：完全不碰 QQ 客户端。
+
+    `force=True` 给用户主动点的「重启」用（跳过冷却）。
+    `force_qr`   见 `_use_quick_login()`。
+    """
+    global _napcat_last_start
+    now = time.time()
+    if not force and _napcat_last_start and (now - _napcat_last_start) < NAPCAT_START_COOLDOWN:
+        log.warning("协议层刚拉过（%.0f 秒前），冷却期内不重复启动 —— "
+                    "避免作废你手上正在用的验证会话",
+                    now - _napcat_last_start)
+        return False
     if not NAPCAT_NODE.exists() or not (NAP_DIR / NAPCAT_ENTRY).exists():
         log.error("NapCat 文件缺失: %s", NAP_DIR)
         return False
@@ -858,13 +964,18 @@ def start_protocol() -> bool:
 
     cmd = [str(NAPCAT_NODE), NAPCAT_ENTRY]
     account = read_account()
-    if account:
+    quick = _use_quick_login(force_qr)
+    mode = "快速登录"
+    if account and quick:
         cmd += ["-q", account]     # 独立模式下 -q 有效（注入模式下会被吞掉）
+    elif account:
+        mode = "扫码登录（上一轮卡在验证，主动降级）"
 
     console = None
     try:
         console = open(LOG_DIR / "napcat_console.log", "a", encoding="utf-8", errors="replace")
-        console.write("\n===== %s 启动协议层（独立模式）=====\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        console.write("\n===== %s 启动协议层（独立模式 · %s）=====\n"
+                      % (time.strftime("%Y-%m-%d %H:%M:%S"), mode))
         console.flush()
     except Exception:
         if console is not None:
@@ -888,6 +999,8 @@ def start_protocol() -> bool:
             console.close()
 
     write_pid("napcat", proc.pid)
+    remember_napcat_pid(proc.pid)
+    _napcat_last_start = time.time()
     log.info("已启动协议层 pid=%d %s", proc.pid,
              "（快速登录 %s）" % account if account else "（需要扫码登录）")
     return True
@@ -1309,7 +1422,7 @@ def tick() -> None:
     # ② 协议层没就绪：进程还在说明正在登录途中，别重复启动；
     #    不在就拉起来 —— 不等后续轮次，同一轮就把整条链补齐。
     if not port_open(3000):
-        if not pid_alive(read_pid("napcat")):
+        if not napcat_alive():
             _stuck_since = None
             log.info("协议层未就绪且进程不在，尝试启动")
             start_protocol()
@@ -1333,12 +1446,22 @@ def tick() -> None:
             # 光写日志没用 —— 日志只有翻的人看得见。卡够时间就弹窗告诉主人。
             if waited >= STUCK_WARN_AFTER:
                 notify_stuck_protocol(True)
+                # 卡的是「等短信验证」还是「等扫码」？两者救法完全不同：
+                #   等验证 → 必须去 WebUI 点，扫码没用（配了密码回退后它不出码）
+                #   等扫码 → 手机扫一下就行
+                # 如果是前者，就把「下次改走扫码」的 flag 立起来 —— 那意味着
+                # 你只要重启一次（或者它下次自己拉），就会拿到一张能扫的二维码，
+                # 省掉开网页 + 等短信 + 填验证码这一整套。
+                _maybe_switch_to_qr()
         return
 
     _stuck_since = None        # 端口起来了，计数归零
     # 端口起来 = 有人扫上码 / 自动登录成功 → 把"欠着的提醒"清掉，
     # 免得她已经恢复了还去告诉主人"她掉线了"。
     notify_stuck_protocol(False)
+    # 同理：登录既然恢复了，就把「下次走扫码」的 flag 撤掉 ——
+    # 否则一次偶发的验证卡顿会让此后每次启动都退化成扫码，白丢免扫码能力。
+    clear_need_qr()
 
     # ③ 协议层就绪 → 保证大脑在跑。
     #    本地模式下还要求 Ollama 也已就绪：否则大脑起来立刻会因连不上模型而报错，

@@ -43,23 +43,7 @@ RUN_DIR = BASE_DIR / "run"
 LOG_DIR = BASE_DIR / "logs"
 DAEMON = BASE_DIR / "daemon.py"
 
-# bot.py 的运行环境解释器。探测顺序与 daemon.py 里保持一致
-# （两处必须一致，否则守护进程拉起的解释器和面板认的不是同一个）。
-def _find_venv_pythonw() -> Path | None:
-    env = os.environ.get("XIAOYOU_PYTHON")
-    if env and Path(env).exists():
-        return Path(env)
-    for root in (BASE_DIR, BASE_DIR.parent):
-        for name in (".venv", "venv", "env"):
-            for rel in (Path("Scripts") / "pythonw.exe", Path("bin") / "pythonw"):
-                cand = root / name / rel
-                if cand.exists():
-                    return cand
-    side = Path(sys.executable).with_name("pythonw.exe")
-    return side if side.exists() else None
-
-
-VENV_PYTHONW = _find_venv_pythonw()
+VENV_PYTHONW = Path(r"C:\Users\26415\.workbuddy\binaries\python\envs\catbot\Scripts\pythonw.exe")
 
 STARTUP_DIR = Path(os.environ.get("APPDATA", "")) / r"Microsoft\Windows\Start Menu\Programs\Startup"
 AUTOSTART_NAME = "小柚QQ猫娘机器人.vbs"      # VBS：wscript 无窗口，开机连一闪都没有
@@ -72,7 +56,7 @@ BAR = "=" * 58
 
 
 def pythonw() -> Path:
-    if VENV_PYTHONW is not None and VENV_PYTHONW.exists():
+    if VENV_PYTHONW.exists():
         return VENV_PYTHONW
     cand = Path(sys.executable).with_name("pythonw.exe")
     return cand if cand.exists() else Path(sys.executable)
@@ -106,6 +90,121 @@ def read_pid(name: str) -> int:
         return int((RUN_DIR / f"{name}.pid").read_text(encoding="ascii").strip())
     except Exception:
         return 0
+
+
+# --------------------------------------------------------------------------
+# 协议层「还活着吗」—— 单一真源（daemon / settings_page 都委托这里）
+# --------------------------------------------------------------------------
+# 为什么不能只认 `run/napcat.pid` 那一个 pid（2026-09-28 实测的代价）：
+#
+#   独立模式下 NapCat 是「主进程 + Fork Worker」**两个 node 进程**，
+#   而 pid 文件只能记一个、且写入是无条件覆盖。于是只要有任何别的路径
+#   （手动跑的脚本、旧的残留进程）往 pid 文件里写了一个很快退出的 pid，
+#   守护进程下一轮巡检就会判定「协议层不在」→ 再拉一个。
+#
+#   **每多拉一次 = WebUI 多一个登录会话 = 上一个验证链接/二维码当场作废。**
+#   用户看到的现象就是「二维码怎么又过期了」「怎么点都点不上」——
+#   而根因只是 pid 文件指向了一个替死鬼。
+#
+# 所以改成记一份**清单**：所有活着、且确实是 node.exe 的都算数，
+# 只要还剩任意一个，协议层就没死。
+NAPCAT_PIDS_FILE = RUN_DIR / "napcat_pids.json"
+
+
+def proc_name(pid: int) -> str:
+    """取进程映像名（小写，不含路径）。取不到返回空串。
+
+    ⚠️ 故意**不调 `tasklist`**：那是额外起一个进程，且输出受系统语言影响
+    （中文系统表头是「映像名称」），又慢又脆。QueryFullProcessImageNameW
+    是同一份数据，直接问内核拿。
+    """
+    if not pid or pid <= 0:
+        return ""
+    import ctypes
+    k32 = ctypes.windll.kernel32
+    h = k32.OpenProcess(0x1000, False, pid)          # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(len(buf))
+        if not k32.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(size)):
+            return ""
+        return os.path.basename(buf.value).lower()
+    except Exception:
+        return ""
+    finally:
+        k32.CloseHandle(h)
+
+
+def read_napcat_pids() -> list[int]:
+    """NapCat 已知 pid 清单（含 pid 文件里那个）。读不到就退回只剩 pid 文件。"""
+    out: list[int] = []
+    try:
+        data = json.loads(NAPCAT_PIDS_FILE.read_text(encoding="utf-8"))
+        for x in (data.get("pids") or []):
+            try:
+                out.append(int(x))
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        pass
+    one = read_pid("napcat")
+    if one and one not in out:
+        out.append(one)
+    return out
+
+
+def write_napcat_pids(pids: list[int]) -> None:
+    """记下协议层的 pid 清单（去重、只留正整数）。"""
+    uniq = sorted({int(p) for p in pids if int(p) > 0})
+    try:
+        NAPCAT_PIDS_FILE.write_text(
+            json.dumps({"pids": uniq}, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def remember_napcat_pid(pid: int) -> None:
+    """新拉起一个 NapCat → 记进清单（**不覆盖**已有活着的那些）。
+
+    ⚠️ 必须同时更新 pid 文件和清单：pid 文件是给 WebUI/别的工具看的"当前那个"，
+    清单才是判活依据。只写其中一个都会退回到「单一 pid」的老坑。
+    """
+    if not pid or pid <= 0:
+        return
+    keep = [p for p in read_napcat_pids() if p != read_pid("napcat")]
+    keep = [p for p in keep if pid_alive(p) and proc_name(p) in ("node.exe", "")]
+    keep.append(pid)
+    write_napcat_pids(keep)
+    try:
+        (RUN_DIR / "napcat.pid").write_text(str(pid), encoding="ascii")
+    except Exception:
+        pass
+
+
+def napcat_alive() -> bool:
+    """协议层进程还活着吗 —— 认**清单里任意一个**，不是只认 pid 文件那一个。
+
+    顺带把清单里的死 pid 清掉，免得越攒越长、每轮巡检都要去 probe 一堆僵尸。
+    """
+    want = read_napcat_pids()
+    alive = [p for p in want
+             if pid_alive(p) and proc_name(p) in ("node.exe", "")]
+    if alive != want:
+        write_napcat_pids(alive)
+    return bool(alive)
+
+
+def napcat_pid() -> int:
+    """协议层「当前那个」 pid —— 优先给活着的清单项，其次 pid 文件。
+
+    面板上只想显示一个数字时用它；判活请用 `napcat_alive()`。
+    """
+    for p in read_napcat_pids():
+        if pid_alive(p):
+            return p
+    return read_pid("napcat")
 
 
 def taskkill_pid(pid: int) -> bool:
@@ -347,8 +446,14 @@ def _do_stop(keep_ollama: bool = True) -> list[str]:
 
     Ollama 默认**不杀** —— 它可能是你自己另外装的、别的程序也在用，
     贸然杀掉会连累别人。想彻底停就用 stop 的完整模式。
+
+    ⚠️ 协议层必须杀掉**全部已知 pid**，不能只杀 pid 文件里那一个：
+    独立模式下 NapCat 是「主进程 + Fork Worker」两个 node，只杀主进程会留下
+    Worker 孤儿（实测 2026-09-28：stop 之后仍有 3 个 node 在跑）。
+    残留的 Worker 会占着 3000/3001 端口或让下次启动行为诡异 —— 这也是
+    「二维码莫名过期」的来源之一。
     """
-    order = [("daemon", "守护进程"), ("bot", "猫娘大脑"), ("napcat", "协议层")]
+    order = [("daemon", "守护进程"), ("bot", "猫娘大脑")]
     if not keep_ollama:
         order.append(("ollama", "推理后端"))
 
@@ -358,6 +463,17 @@ def _do_stop(keep_ollama: bool = True) -> list[str]:
         if taskkill_pid(pid):
             stopped.append("%s pid %d" % (label, pid))
         clear_pid(name)
+
+    # 协议层单独处理：清单一网打尽
+    for pid in read_napcat_pids():
+        if taskkill_pid(pid):
+            stopped.append("协议层 pid %d" % pid)
+    clear_pid("napcat")
+    try:
+        NAPCAT_PIDS_FILE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
     return stopped
 
 
@@ -923,7 +1039,7 @@ def cmd_status() -> int:
     if protocol_up():
         print("  [OK]   协议层     HTTP 3000 / WS 3001 都在监听")
     else:
-        npid = read_pid("napcat")
+        npid = napcat_pid()
         qr = _qr_age()
         diag = _scan_login_log()
         issue = diag["issue"]
@@ -968,7 +1084,7 @@ def cmd_status() -> int:
             print("                        清空密码 → 再重启一次，二维码就回来了。")
             if age_h >= 1:
                 print("                    （这条记录是 %.1f 小时前的）" % age_h)
-        elif pid_alive(npid) and qr is not None and qr < 240:
+        elif napcat_alive() and qr is not None and qr < 240:
             print("  [!!]   协议层     需要扫码登录 —— QQ 登录态过期了")
             if kind == "quickfail":
                 print("                    提速：本地登录态已失效，所以免扫码的快速登录走不通，")
@@ -977,7 +1093,7 @@ def cmd_status() -> int:
                 print("                    注意：上一张二维码扫过了但服务器没放行，可能又要扫")
             print("                    双击「扫码登录.bat」：弹出的二维码会自动刷新，扫到成功为止")
             print("                    备用入口（浏览器）：%s" % _webui_url())
-        elif pid_alive(npid):
+        elif napcat_alive():
             print("  [..]   协议层     进程在（pid %d）但端口没起，可能正在登录" % npid)
             print("                    若超过 1 分钟没动静，双击「扫码登录.bat」")
         else:
