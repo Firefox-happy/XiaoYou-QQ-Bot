@@ -32,7 +32,21 @@
     ],
     "max_chars": 180,
     "split_threshold": 120,
-    "on_error": "（小柚的脑袋卡住了…主人稍等一下喵）"
+    "on_error": "（小柚的脑袋卡住了…主人稍等一下喵）",
+    "chunk": {
+      "enabled": true,
+      "min_chars": 6,
+      "max_chunks": 6,
+      "gap": [
+        0.8,
+        2.6
+      ],
+      "gap_jitter": 0.35,
+      "per_char": 0.012,
+      "per_char_cap": 0.8,
+      "long_para": 60,
+      "only_short_mode": true
+    }
   },
   "memory": {
     "max_turns": 12,
@@ -104,6 +118,15 @@
     "per_session_cooldown": 3,
     "global_per_minute": 20,
     "max_concurrent": 2
+  },
+  "coalesce": {
+    "enabled": true,
+    "quiet": 1.8,
+    "quiet_max": 4.0,
+    "max_parts": 5,
+    "private": true,
+    "group": false,
+    "reset_on_reply": true
   },
   "watch": {
     "enabled": true,

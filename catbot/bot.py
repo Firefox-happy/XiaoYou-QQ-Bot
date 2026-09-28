@@ -151,7 +151,19 @@ DEFAULT_CONFIG = {
         "typing_delay": [0.8, 2.2],
         "max_chars": 180,
         "split_threshold": 120,
-        "on_error": "（小柚的脑袋卡住了…主人稍等一下喵）"
+        "on_error": "（小柚的脑袋卡住了…主人稍等一下喵）",
+        # ---- 分句连发（像真人一句一句敲出来）----
+        "chunk": {
+            "enabled": True,        # 关掉＝整条一次发完，回到老行为
+            "min_chars": 6,         # 短于这个长度的句子并进上一句，免得"嗯。"单独发一条
+            "max_chunks": 6,        # 最多拆几条；超出的并进最后一条，防止刷屏
+            "gap": [0.8, 2.6],      # 两条之间的停顿，逐个句子随机取（秒）
+            "gap_jitter": 0.35,     # 在随机值上再抖一下，避免节奏周期化被看出来
+            "per_char": 0.012,      # 按字数补一点点：刚发的那句越长，下一句准备越久
+            "per_char_cap": 0.8,    # 字数加成的上限（秒）
+            "long_para": 60,        # 单句超过这个字数就不再拆，整句发（长段落拆开读着断）
+            "only_short_mode": True  # 只有日常闲聊拆句；查资料的认真模式整条发
+        }
     },
     "memory": {
         "max_turns": 12,
@@ -225,6 +237,20 @@ DEFAULT_CONFIG = {
         "per_session_cooldown": 3,
         "global_per_minute": 20,
         "max_concurrent": 2
+    },
+    # ---- 别抢话：等对方把话说完再回 ----------------------------------------
+    # 很多人习惯把一整段话拆成好几条连发。收到第一条就抢着回答，
+    # 会插在对方句子中间，像截话。这里给一个"静默等待窗口"：
+    # 收到消息后先攒着，等 quiet 秒内没有新消息了，才把攒的几条
+    # **按顺序合并成一条**交给模型 —— 她看到的就是"整段话"。
+    "coalesce": {
+        "enabled": True,
+        "quiet": 1.8,        # 静默多久算"说完了"。太小仍会抢话，太大会显得迟钝
+        "quiet_max": 4.0,    # 对方一直不停地发时，最长等这么久就强制回，别晾着
+        "max_parts": 5,      # 最多合并几条；超出先把前面的放出去（防止无限攒）
+        "private": True,     # 私聊开（一对一，最容易被连发轰炸）
+        "group": False,      # 群聊关：群里人多嘴杂，"等静默"可能永远等不到
+        "reset_on_reply": True   # 她刚回过话就重置窗口，不把跨越回复的旧话攒进来
     },
     # ---- 自愈：这两段是给守护进程（daemon.py）看的 --------------------------
     # 大脑自己不用它们，所以别在 bot.py 里读 —— 读的是 daemon.py。
@@ -851,6 +877,80 @@ def _truncate_nicely(text: str, limit: int) -> str:
     return window.rstrip() + "…"
 
 
+def split_sentences(text: str, min_chars: int = 6,
+                    max_chunks: int = 6, long_para: int = 60) -> list[str]:
+    """把一段话切成"一条一条发"的句子。
+
+    和 split_message 的区别：那个只在超长时按阈值切 3 段，纯粹为了控长度；
+    这个是为了**拟真**——像真人打字，一句一句往外蹦。
+
+    三条保底规则（都是实测踩出来的）：
+      · 太短的句子（"嗯。""哈哈"）并进上一句，不然像卡带；
+      · 单句太长（>long_para）不再切，长段落拆开发读起来是断的；
+      · 超过 max_chunks 的尾巴全部并进最后一条，防止刷屏式轰炸。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    # 先按「句末标点 + 换行」切，标点跟着前一句走
+    raw, buf = [], ""
+    for ch in text:
+        if ch == "\n":
+            if buf.strip():
+                raw.append(buf.strip())
+            buf = ""
+            continue
+        buf += ch
+        if ch in "。！？!?…":
+            raw.append(buf.strip())
+            buf = ""
+    if buf.strip():
+        raw.append(buf.strip())
+
+    # 续接标点（，、；～）说明话没说完，粘回上一句
+    merged: list[str] = []
+    for piece in raw:
+        if not merged:
+            merged.append(piece)
+            continue
+        prev = merged[-1]
+        if piece[0] in "，、；;～~）)" or len(piece) < min_chars:
+            merged[-1] = prev + piece
+        else:
+            merged.append(piece)
+
+    # 长段落不参与"条数预算"：它必须整条发（拆开读着是断的），
+    # 而条数上限只用来约束那些短句，免得刷屏。
+    budget_idx = [i for i, p in enumerate(merged) if len(p) <= long_para]
+    if len(budget_idx) > max_chunks:
+        # 保留前 max_chunks-1 条短句，剩下的短句全部并进最后那一条
+        keep = budget_idx[:max_chunks - 1]
+        tail_start = budget_idx[max_chunks - 1]
+        kept_set = set(keep)
+        out, i = [], 0
+        while i < len(merged):
+            if i in kept_set:
+                out.append(merged[i])
+                i += 1
+            elif i == tail_start:
+                # 从 tail_start 起，把连续的短句并成一条（长段落原样穿过）
+                bucket, j = [], i
+                while j < len(merged):
+                    if len(merged[j]) <= long_para:
+                        bucket.append(merged[j])
+                    else:
+                        break
+                    j += 1
+                out.append("".join(bucket))
+                i = j
+            else:
+                out.append(merged[i])
+                i += 1
+        return out
+    return merged or [text]
+
+
 def split_message(text: str, threshold: int) -> list[str]:
     """超长回复按句号切成两条，更像真人连发。"""
     if len(text) <= threshold:
@@ -958,6 +1058,159 @@ class RateLimiter:
 
 
 # --------------------------------------------------------------------------
+# 别抢话：等对方把话说完，再把连发的几条并成一条
+# --------------------------------------------------------------------------
+
+class Coalescer:
+    """给"连发轰炸"用的静默等待窗口。
+
+    场景：对方把一整段话拆成 3~5 条快速发出。机器人收到第一条就抢着回答，
+    会插在他的句子中间 —— 像一个不停打断人说话的家伙，很出戏。
+
+    做法：消息先进这个窗口"攒着"，谁也别急着回。窗口的规则是
+    **静默 quiet 秒内没有新消息**才算对方说完了，这时把攒下的几条
+    按原顺序拼成一条，一次性交给模型。于是她看到的是"整段话"，
+    回答也就能对着完整的语义，而不是对着半句话。
+
+    三个必须处理的边界（漏一个就会出现"回两次"或"永远不回"）：
+
+    1. **同一会话只有最后一条能发。** 不能每条都自己 sleep 再各自回复 ——
+       那样连发 3 条就会得到 3 个回复，比抢话还糟。所以这里用「世代号
+       (generation)」判定：新消息一来世代号 +1，旧的那条醒来发现自己的
+       世代号过期了，直接放弃，把发言权让给后来的。
+    2. **不能无限等。** 对方手速极快、一直在发，静默永远等不到 —— 所以
+       有个 `quiet_max` 上限，攒够时间就强制放行。
+    3. **不能无限攒。** 条数超过 `max_parts` 就先放一批出去，避免内存和她
+       的上下文被一条长期不结束的输入撑爆。
+    """
+
+    def __init__(self, cfg: dict):
+        c = cfg or {}
+
+        def _num(key, default):
+            """配置项读成数字。用户手改出非数字也要活着 —— 一个 ValueError
+            会让 bot 起不来，那比"等得久一点"严重得多。"""
+            try:
+                return float(c.get(key, default))
+            except (TypeError, ValueError):
+                logger.warning("coalesce.%s 配置异常，回落到默认 %s", key, default)
+                return float(default)
+
+        self.enabled = bool(c.get("enabled", True))
+        self.quiet = max(0.0, _num("quiet", 1.8))
+        self.quiet_max = max(self.quiet, _num("quiet_max", 4.0))
+        try:
+            self.max_parts = max(1, int(c.get("max_parts", 5)))
+        except (TypeError, ValueError):
+            logger.warning("coalesce.max_parts 配置异常，回落到默认 5")
+            self.max_parts = 5
+        self.private = bool(c.get("private", True))
+        self.group = bool(c.get("group", False))
+        self._reset_on_reply = bool(c.get("reset_on_reply", True))
+
+        self._lock = threading.Lock()
+        # key -> {"gen": 世代号, "parts": [文本...], "first": 首条时刻,
+        #         "ev": 唤醒事件, "waiter": 正在等的那条消息 id}
+        self._state: dict[str, dict] = {}
+
+    # --- 判定某条消息要不要走窗口 ---
+    def should_wait(self, key: str, is_group: bool) -> bool:
+        if not self.enabled:
+            return False
+        return self.group if is_group else self.private
+
+    def _entry(self, key: str) -> dict:
+        st = self._state.get(key)
+        if st is None:
+            st = {"gen": 0, "parts": [], "first": 0.0, "last_at": 0.0,
+                  "ev": threading.Event(), "waiter": None}
+            self._state[key] = st
+        return st
+
+    def submit(self, key: str, text: str) -> None:
+        """把一条消息放进窗口（调用方已确认 should_wait）。"""
+        now = time.time()
+        with self._lock:
+            st = self._entry(key)
+            if not st["parts"]:
+                st["first"] = now
+            st["parts"].append(text)
+            st["last_at"] = now       # 静默计时以"最后一条"为基准
+            st["gen"] += 1
+            st["ev"].set()          # 唤醒可能正在 sleep 的那条，让它重算等待
+
+    def wait_for_quiet(self, key: str) -> tuple[list[str], int] | None:
+        """等到"对方说完了"。返回 (合并后的若干条, 我的世代号)；
+        如果自己已经被更新的消息顶替，返回 None（表示"这条不该回了"）。
+
+        返回值是**列表**：攒超 max_parts 时会切成多批，调用方按顺序处理。
+        """
+        while True:
+            with self._lock:
+                st = self._state.get(key)
+                if st is None:
+                    return None
+                my_gen = st["gen"]
+                st["ev"].clear()
+
+            # 在窗口内反复醒来检查，直到静默够久 或 到强制上限
+            while True:
+                with self._lock:
+                    st = self._state.get(key)
+                    if st is None:
+                        return None
+                    if st["gen"] != my_gen:
+                        return None          # 被更新的消息顶替 → 放弃
+                    now = time.time()
+                    quiet_for = now - st.get("last_at", st["first"])
+                    total_for = now - st["first"]
+                    parts_now = list(st["parts"])
+                    if quiet_for >= self.quiet:
+                        break                # 静默够了 → 对方说完了
+                    if total_for >= self.quiet_max:
+                        break                # 等太久了 → 强制放行
+                    if len(parts_now) >= self.max_parts:
+                        break                # 攒太多了 → 先放一批
+                    ev = st["ev"]
+                ev.wait(timeout=min(self.quiet, 0.25))
+
+            # 提交给模型前，先把窗口清干净（这批已经"拿走"了）
+            with self._lock:
+                st = self._state.get(key)
+                if st is None:
+                    return None
+                if st["gen"] != my_gen:
+                    return None
+                parts_now = list(st["parts"])
+                rest = parts_now[self.max_parts:]
+                st["parts"] = rest
+                st["first"] = time.time() if rest else 0.0
+                if rest:
+                    st["gen"] += 1        # 剩下的那批算是新的一代
+                    st["ev"].clear()
+                took_gen = my_gen
+            if not parts_now:
+                return None
+            return parts_now[:self.max_parts], took_gen
+
+    def note_reply(self, key: str) -> None:
+        """机器人刚回过话 —— 把窗口重置，免得把跨越她那次回复的旧话攒进来。"""
+        if not self._reset_on_reply:
+            return
+        with self._lock:
+            st = self._state.get(key)
+            if st is not None:
+                st["parts"] = []
+                st["first"] = 0.0
+                st["gen"] += 1
+                st["ev"].clear()
+
+    def drop(self, key: str) -> None:
+        with self._lock:
+            self._state.pop(key, None)
+
+
+# --------------------------------------------------------------------------
 # 主程序
 # --------------------------------------------------------------------------
 
@@ -977,6 +1230,8 @@ class CatBot:
         self.api = OneBot(self.cfg)
         self.limiter = RateLimiter(self.cfg)
         self.tools = ToolRegistry(self.cfg.data)
+        # 连发合并：别抢话。见 Coalescer 类注释。
+        self.coalescer = Coalescer(self.cfg.data.get("coalesce"))
         self.pool = ThreadPoolExecutor(max_workers=int(self.cfg["rate_limit"]["max_concurrent"]))
         self._session_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
         self._seen: deque = deque(maxlen=200)
@@ -1382,7 +1637,8 @@ class CatBot:
         is_group = mt == "group"
         sender = ev.get("sender") or {}
         name = sender.get("card") or sender.get("nickname") or str(ev.get("user_id"))
-        text = self._resolve_text(ev, is_group, self_id)
+        # 走窗口时收到的多条连发已被拼成一条（见 _await_coalesce）
+        text = ev.get("_merged_text") or self._resolve_text(ev, is_group, self_id)
         if not text:
             text = "（戳了戳你）"
 
@@ -1463,6 +1719,7 @@ class CatBot:
                     if self._send_voice(ev, is_group, reply):
                         self.memory.append(key, user_line, reply)
                         self._touch(key, engaged=True)
+                        self.coalescer.note_reply(key)
                         return
 
                 # 模拟打字
@@ -1470,20 +1727,25 @@ class CatBot:
                 base_delay = random.uniform(float(lo), float(hi))
                 time.sleep(base_delay + min(len(reply) * 0.02, 1.0))
 
-                # 认真模式的长回复整条发完 —— split_message 只保留前 3 段，
-                # 拿去切 600 字的资料会把后半段直接丢掉。
-                chunks = ([reply] if used_tools
-                          else split_message(reply, int(self.cfg["reply"]["split_threshold"])))
+                chunks = self._plan_chunks(reply, used_tools)
                 for i, chunk in enumerate(chunks):
                     # 前面已经发过"我去查查"，就不用再 at 一次了
                     at = (is_group and self.cfg["reply"]["at_sender_in_group"]
                           and i == 0 and not acked["flag"])
                     if i:
-                        time.sleep(random.uniform(0.5, 1.2))
+                        time.sleep(self._chunk_gap(chunks[i - 1]))
                     self._send(ev, is_group, chunk, at=at)
+
+                if len(chunks) > 1:
+                    logger.info("分 %d 句连发（间隔随机 %.1f~%.1fs）",
+                                len(chunks), self._chunk_gap_cfg()[0],
+                                self._chunk_gap_cfg()[1])
 
                 self.memory.append(key, user_line, reply)
                 self._touch(key, engaged=True)
+                # 刚回过话 → 重置窗口。否则"她回复前后"的语言会被当成
+                # 一次连发攒到一起，下一次回话就对不上上下文了。
+                self.coalescer.note_reply(key)
 
             except requests.exceptions.ConnectionError:
                 logger.error("连不上模型服务，检查 Ollama 是否在运行")
@@ -1493,6 +1755,70 @@ class CatBot:
                 self._safe_reply(ev, is_group, "（小柚想了好久…主人再说一遍嘛）")
             except Exception as e:
                 logger.exception("处理消息出错: %s", e)
+
+    # --- 分句连发 ---
+    def _chunk_cfg(self) -> dict:
+        """取分句配置，缺字段一律回落到内置默认值（老 config 也不会炸）。"""
+        c = dict((self.cfg["reply"].get("chunk") or {}))
+        base = {"enabled": True, "min_chars": 6, "max_chunks": 6,
+                "gap": [0.8, 2.6], "gap_jitter": 0.35,
+                "per_char": 0.012, "per_char_cap": 0.8,
+                "long_para": 60, "only_short_mode": True}
+        base.update(c)
+        return base
+
+    def _chunk_gap_cfg(self) -> tuple[float, float]:
+        """取间隔区间。配置被手改成非数字/写反/长度不对，都回落到默认值 ——
+        这类配置错误绝不能冒泡成异常，否则她一句话都发不出来。"""
+        default = (0.8, 2.6)
+        try:
+            gap = self._chunk_cfg()["gap"]
+            lo, hi = float(gap[0]), float(gap[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            logger.warning("reply.chunk.gap 配置异常，已回落到默认 %s", default)
+            return default
+        if lo < 0 or hi < 0:
+            logger.warning("reply.chunk.gap 出现负值，已回落到默认 %s", default)
+            return default
+        return (lo, hi) if lo <= hi else (hi, lo)
+
+    def _plan_chunks(self, reply: str, used_tools: bool) -> list[str]:
+        """决定这条回复怎么发：整条 or 拆成几句。配置坏了就整条发（最稳）。"""
+        c = self._chunk_cfg()
+        if not c["enabled"]:
+            return [reply]
+        # 认真模式（查过资料）整条发：分点列来源的结论拆开发，读着更累
+        if used_tools and c["only_short_mode"]:
+            return [reply]
+        try:
+            return split_sentences(reply, int(c["min_chars"]),
+                                   int(c["max_chunks"]), int(c["long_para"]))
+        except (TypeError, ValueError, KeyError):
+            logger.warning("reply.chunk 配置异常，本条回复整条发出")
+            return [reply]
+
+    def _chunk_gap(self, prev_chunk: str) -> float:
+        """算出这句话和下一句之间的停顿（秒）。
+
+        真人打字的间隔不是固定值，也不是纯随机 —— 上一句越长，
+        下一句"敲"得越久。所以 = 区间随机 + 按上句长度的小加成 + 一点点抖动。
+        """
+        c = self._chunk_cfg()
+        lo, hi = self._chunk_gap_cfg()
+
+        def _num(key, default):
+            """配置项读成数字；填了非数字就退回默认，绝不抛异常。"""
+            try:
+                v = float(c[key])
+                return v if v >= 0 else default
+            except (TypeError, ValueError, KeyError):
+                return default
+
+        gap = random.uniform(lo, hi)
+        cap = _num("per_char_cap", 0.8)
+        gap += min(len(prev_chunk) * _num("per_char", 0.012), cap)
+        gap += random.uniform(0.0, _num("gap_jitter", 0.35))
+        return max(0.2, gap)
 
     def _send(self, ev, is_group: bool, text: str, at: bool = False) -> None:
         """发一条消息。at=True 时在群里 @ 一下说话的人。"""
@@ -1539,7 +1865,45 @@ class CatBot:
                 self._touch(f"p{uid}")
 
         self._submitted += 1
-        self.pool.submit(self._run_handle, ev)
+        # 需要"等对方说完"的会话走独立线程：窗口等待**绝不能占用线程池**，
+        # 否则 max_concurrent 一满（默认才 2），连发的第 3 条会卡在池子队列里
+        # 迟迟进不了窗口 → 合并出来的话是残缺的、时序也是乱的。
+        # 每条消息一个轻量线程（只是 ev.wait 轮询，极省），等到静默结束
+        # 才回到主池去跑真正的推理。见 Coalescer 注释。
+        if self.coalescer.should_wait(self._session_key(ev),
+                                      ev.get("message_type") == "group"):
+            threading.Thread(target=self._run_coalesced, args=(ev,),
+                             name="coalesce", daemon=True).start()
+        else:
+            self.pool.submit(self._run_handle, ev)
+
+    @staticmethod
+    def _session_key(ev: dict) -> str:
+        if ev.get("message_type") == "group":
+            return f"g{ev.get('group_id')}"
+        return f"p{ev.get('user_id')}"
+
+    def _run_coalesced(self, ev: dict) -> None:
+        """窗口版入口：先把连发的几条攒齐，再交给真正的处理逻辑。
+
+        跑在独立线程上（不在主池里）：等待期间只是 ev.wait 轮询，很省；
+        等静默结束了，才把合并好的事件丢回主池去跑推理。
+        记账只记"真正在算"的那段 —— 等窗口不算忙，否则 daemon 会看到
+        busy 涨到快两秒，以为她卡住了。
+        """
+        try:
+            ev2 = self._await_coalesce(ev)
+            if ev2 is None:
+                with self._busy_lock:
+                    self._finished += 1     # 放弃的这条也算"处理完了"
+                return
+        except Exception as e:
+            logger.exception("合并等待出错: %s", e)
+            with self._busy_lock:
+                self._finished += 1
+            return
+        # 合并完成 → 回到主池，走和其它消息一样的记账路径
+        self.pool.submit(self._run_handle, ev2)
 
     def _run_handle(self, ev: dict) -> None:
         """线程池里的真正入口 —— 包一层，只为留下"这条跑了多久"的痕迹。
@@ -1560,6 +1924,35 @@ class CatBot:
                     self._inflight.remove(t0)
                 except ValueError:       # 理论上不会发生；真发生了也别把计数搞乱
                     self._inflight.clear()
+
+    def _await_coalesce(self, ev: dict) -> dict | None:
+        """如果对方可能还在接着说，就在窗口里等他把话说完。
+
+        返回**替换后的 ev**（把连发的几条合并成一条文本），或 None 表示
+        这条已经不该由自己回（让给后面那条）。不需要等待时原样返回 ev。
+        """
+        mt = ev.get("message_type")
+        is_group = mt == "group"
+        key = self._session_key(ev)
+        if not self.coalescer.should_wait(key, is_group):
+            return ev
+
+        self_id = str(ev.get("self_id", ""))
+        text = self._resolve_text(ev, is_group, self_id) or "（戳了戳你）"
+
+        self.coalescer.submit(key, text)
+        got = self.coalescer.wait_for_quiet(key)
+        if got is None:
+            logger.debug("这条消息被后来的顶替，交给她一起回 [%s]", key)
+            return None
+        parts, _gen = got
+        if len(parts) > 1:
+            logger.info("等他说完：把 %d 条连发合并成一条 [%s] %s",
+                        len(parts), key, " / ".join(p[:24] for p in parts))
+            ev = dict(ev)                     # 不污染原事件
+            ev["_coalesced"] = parts
+            ev["_merged_text"] = "\n".join(parts)
+        return ev
 
     # --- 心跳：告诉守护进程"我还能干活" ---
     def _heartbeat_payload(self) -> dict:

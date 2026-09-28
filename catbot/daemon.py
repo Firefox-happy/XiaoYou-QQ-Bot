@@ -865,6 +865,67 @@ def ensure_boringssl() -> bool:
 NAPCAT_START_COOLDOWN = 120.0
 _napcat_last_start = 0.0
 
+# ---- 连续失败的指数退避（2026-09-28 加）----------------------------------
+#
+# 光有上面那个冷却期还不够，它有个漏洞：`_napcat_last_start` 是**内存变量**，
+# 守护进程自己一重启就归零（模块级赋值只跑一次）。而守护进程重启恰恰是最常见
+# 的情形 —— 用户点启动器、改完代码自愈、崩溃自愈都算。于是冷却在最需要它的
+# 时刻失效。
+#
+# 实测代价（09-23 ~ 09-28，logs/napcat_console.log）：
+#   协议层被拉起 63 次、被 QQ 踢下线 16 次、索要短信验证码 43 次。
+#
+# 更要紧的是：**每一次拉起 = 一次新的登录请求**。账号被风控时（腾讯返回
+# serverErrorCode 168「账号近期存在安全风险」，或反复索要短信验证码），
+# 死磕重试等于持续给风控递证据，越试越难登 —— 这是自我强化的恶性循环。
+#
+# 所以状态落到文件，并在连续失败时按 2 的幂退避；真登上了立刻清零：
+#   连败 1 次 → 2 分钟      连败 2 次 → 4 分钟
+#   连败 3 次 → 8 分钟      连败 4 次及以上 → 16 分钟 →（被上限压到）30 分钟
+BACKOFF_FILE = RUN_DIR / "napcat_backoff.json"
+BACKOFF_MAX = 1800.0          # 退避上限 30 分钟
+BACKOFF_MAX_DOUBLINGS = 4     # 最多翻 4 次：120s × 16 = 1920s，再被上限压到 1800s
+
+
+def _backoff_read() -> dict:
+    """读退避状态：{"last_start": 上次拉起时刻, "fails": 连续失败次数}。
+
+    文件坏了/不存在就当"从没失败过" —— 这状态是给故障期用的，
+    它自己先抛异常就没意义了。
+    """
+    try:
+        d = json.loads(BACKOFF_FILE.read_text(encoding="utf-8"))
+        return {"last_start": float(d.get("last_start") or 0.0),
+                "fails": max(0, int(d.get("fails") or 0))}
+    except Exception:
+        return {"last_start": 0.0, "fails": 0}
+
+
+def _backoff_write(last_start: float, fails: int) -> None:
+    """落盘退避状态。写失败只记日志，绝不因此中断启动流程。"""
+    try:
+        BACKOFF_FILE.write_text(json.dumps({
+            "last_start": last_start,
+            "fails": fails,
+            "updated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }), encoding="utf-8")
+    except Exception:
+        log.exception("写退避状态失败（不影响本次启动）")
+
+
+def _cooldown_now() -> float:
+    """当前该等多久：基础冷却 × 2^连续失败次数，封顶 BACKOFF_MAX。"""
+    fails = _backoff_read()["fails"]
+    return min(NAPCAT_START_COOLDOWN * (2 ** min(fails, BACKOFF_MAX_DOUBLINGS)),
+               BACKOFF_MAX)
+
+
+def protocol_backoff_state() -> tuple[float, int]:
+    """给状态页用：(还要等几秒才能再拉, 连续失败次数)。"""
+    st = _backoff_read()
+    left = max(0.0, _cooldown_now() - (time.time() - st["last_start"]))
+    return left, st["fails"]
+
 
 # --------------------------------------------------------------------------
 # 启动方式：带 `-q`（快速登录）还是不带（二维码）
@@ -951,10 +1012,15 @@ def start_protocol(force: bool = False, force_qr: bool | None = None) -> bool:
     """
     global _napcat_last_start
     now = time.time()
-    if not force and _napcat_last_start and (now - _napcat_last_start) < NAPCAT_START_COOLDOWN:
-        log.warning("协议层刚拉过（%.0f 秒前），冷却期内不重复启动 —— "
-                    "避免作废你手上正在用的验证会话",
-                    now - _napcat_last_start)
+    # 取内存与磁盘里更晚的那个：内存管本轮，磁盘管"守护进程重启过"这一情形。
+    st = _backoff_read()
+    last = max(_napcat_last_start, st["last_start"])
+    wait = _cooldown_now()
+    if not force and last and (now - last) < wait:
+        log.warning("协议层刚拉过（%.0f 秒前，连续失败 %d 次）—— 冷却期内不重复启动，"
+                    "还需等 %d 秒。既避免作废你手上的验证会话，"
+                    "也避免连续登录请求给账号风控添证据",
+                    now - last, st["fails"], int(wait - (now - last)))
         return False
     if not NAPCAT_NODE.exists() or not (NAP_DIR / NAPCAT_ENTRY).exists():
         log.error("NapCat 文件缺失: %s", NAP_DIR)
@@ -1001,6 +1067,9 @@ def start_protocol(force: bool = False, force_qr: bool | None = None) -> bool:
     write_pid("napcat", proc.pid)
     remember_napcat_pid(proc.pid)
     _napcat_last_start = time.time()
+    # 记一笔"又拉了一次"。失败计数在这里递增，等端口 3000 真的开了才清零
+    # （见 tick()）—— 中间这个过程就是在等扫码/等验证，算失败。
+    _backoff_write(_napcat_last_start, st["fails"] + 1)
     log.info("已启动协议层 pid=%d %s", proc.pid,
              "（快速登录 %s）" % account if account else "（需要扫码登录）")
     return True
@@ -1456,6 +1525,13 @@ def tick() -> None:
         return
 
     _stuck_since = None        # 端口起来了，计数归零
+    # 真登上了 —— 连续失败计数清零，下次回到 2 分钟的基础冷却。
+    # 只在确有变化时写盘，否则每 45 秒一轮巡检都在写文件。
+    _bs = _backoff_read()
+    if _bs["fails"]:
+        _backoff_write(time.time(), 0)
+        log.info("协议层已登录，连续失败计数从 %d 清零（冷却恢复到 %.0f 秒）",
+                 _bs["fails"], NAPCAT_START_COOLDOWN)
     # 端口起来 = 有人扫上码 / 自动登录成功 → 把"欠着的提醒"清掉，
     # 免得她已经恢复了还去告诉主人"她掉线了"。
     notify_stuck_protocol(False)
