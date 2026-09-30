@@ -8,6 +8,7 @@ bot.py 逻辑单元测试 —— 不依赖 QQ、不依赖模型，纯函数级�
 
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -44,7 +45,23 @@ group_msg = [seg("at", qq="10001"), seg("text", text=" 在吗")]
 check("extract_text 组合", bot.extract_text(group_msg), "@10001 在吗")
 check("extract_text 纯文本", bot.extract_text("你好呀"), "你好呀")
 check("extract_text 图片", bot.extract_text([seg("text", text="看这个"), seg("image", file="a.jpg")]), "看这个[图片]")
-check("extract_text 混合", bot.extract_text([seg("face", id="1"), seg("text", text="哈哈")]), "[表情]哈哈")
+check("extract_text 混合", bot.extract_text([seg("face", id="1"), seg("text", text="哈哈")]), "[表情:撇嘴]哈哈")
+check("内置表情名称", bot.extract_text([seg("face", id="14")]), "[表情:微笑]")
+check("未知表情 ID 回退", bot.extract_text([seg("face", id="99999")]), "[表情(id=99999)]")
+check("商城表情摘要", bot.extract_text([seg("mface", summary=" /菜汪 ")]), "[表情包:菜汪]")
+check("商城空摘要回退", bot.extract_text([seg("mface", summary=" / ")]), "[表情包]")
+check("商城缺失摘要回退", bot.extract_text([seg("mface")]), "[表情包]")
+check("商城异常摘要回退", bot.extract_text([seg("mface", summary=123)]), "[表情包]")
+check("文字加表情", bot.extract_text([seg("text", text="好耶"), seg("face", id="14")]), "好耶[表情:微笑]")
+check("表情加图片保留占位", bot.extract_text([seg("face", id="179"), seg("image", file="a.jpg")]), "[表情:doge][图片]")
+check("整数表情 ID", bot.extract_text([seg("face", id=270)]), "[表情:emm]")
+check("异常消息段忽略", bot.extract_text([{"type": "mface", "data": 123}]), "")
+check("触发用文本排除表情", bot.extract_text([seg("text", text="你好"), seg("face", id="14"), seg("mface", summary="/小柚")], include_faces=False), "你好")
+for bad_map in ("not json", "[]"):
+    with patch.object(bot, "_FACE_MAP", None), patch.object(Path, "read_text", return_value=bad_map):
+        check("损坏映射回退 " + bad_map, bot.extract_text([seg("face", id="14")]), "[表情(id=14)]")
+with patch.object(bot, "_FACE_MAP", None), patch.object(Path, "read_text", side_effect=FileNotFoundError):
+    check("缺失映射回退", bot.extract_text([seg("face", id="14")]), "[表情(id=14)]")
 
 print("\n=== 2. @ 检测与剥离 ===")
 check_true("is_at_me 命中", bot.is_at_me(group_msg, "10001"))
@@ -124,6 +141,12 @@ check("私聊触发", fb._should_reply(ev_pv), (True, "private"))
 
 ev_other = {"self_id": 10001, "message_type": "notice", "message_id": 6}
 check("非消息事件不触发", fb._should_reply(ev_other), (False, "unknown_type"))
+
+emoji_msg = [seg("mface", summary="/小柚"), seg("face", id="14")]
+check("群表情摘要不误触发", fb._should_reply(dict(BASE, message=emoji_msg)), (False, "no_trigger"))
+check("私聊纯表情仍触发", fb._should_reply(dict(ev_pv, message=emoji_msg)), (True, "private"))
+check("群@加表情仍触发", fb._should_reply(dict(BASE, message=[seg("at", qq="10001")] + emoji_msg)), (True, "at"))
+check("群文字关键词加表情仍触发", fb._should_reply(dict(BASE, message=[seg("text", text="小柚在吗")] + emoji_msg)), (True, "keyword"))
 
 print("\n=== 7. 限流 ===")
 class FakeLim:
